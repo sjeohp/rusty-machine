@@ -18,5 +18,6 @@ datasets = []
 [dependencies]
 num = { version = "0.1.41", default-features = false }
 rand = "0.4.1"
-rulinalg = { git = "https://github.com/AtheMathmo/rulinalg", rev = "1ed8b937" }
+rulinalg = { git = "https://github.com/sjeohp/rulinalg.git", rev = "ba21737" }
 kdtree = "0.5"
+itertools = "0.8"

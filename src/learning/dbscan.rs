@@ -30,15 +30,15 @@
 //!                                     -2.0, 3.0,
 //!                                     -2.2, 3.1]);
 //!
-//! let mut model = DBSCAN::new(0.5, 2);
-//! model.train(&inputs).unwrap();
+//! let mut model = DBSCAN::new(&inputs, 0.5, 2);
 //!
-//! let clustering = model.clusters().unwrap();
+//! let clustering = model.clusters();
 //! ```
 
 use learning::error::{Error, ErrorKind};
 use learning::{LearningResult, UnSupModel};
 
+use itertools::Itertools;
 use kdtree::distance::squared_euclidean;
 use kdtree::KdTree;
 use linalg::{BaseMatrix, Matrix, Vector};
@@ -53,10 +53,8 @@ use rulinalg::utils;
 pub struct DBSCAN {
     eps: f64,
     min_points: usize,
-    clusters: Option<Vector<Option<usize>>>,
-    predictive: bool,
+    clusters: Vec<Option<usize>>,
     _visited: Vec<bool>,
-    _cluster_data: Option<Matrix<f64>>,
 }
 
 /// Constructs a non-predictive DBSCAN model with the
@@ -69,10 +67,8 @@ impl Default for DBSCAN {
         DBSCAN {
             eps: 0.5,
             min_points: 5,
-            clusters: None,
-            predictive: false,
-            _visited: Vec::new(),
-            _cluster_data: None,
+            clusters: vec![],
+            _visited: vec![],
         }
     }
 }
@@ -80,7 +76,6 @@ impl Default for DBSCAN {
 impl UnSupModel<Matrix<f64>, Vector<Option<usize>>> for DBSCAN {
     /// Train the classifier using input data.
     fn train(&mut self, inputs: &Matrix<f64>) -> LearningResult<()> {
-        self.init_params(inputs.rows());
         let mut cluster = 0;
         let mut neighbours = Vec::with_capacity(inputs.rows());
         let mut sub_neighbours = Vec::with_capacity(inputs.rows());
@@ -108,83 +103,44 @@ impl UnSupModel<Matrix<f64>, Vector<Option<usize>>> for DBSCAN {
             }
         }
 
-        if self.predictive {
-            self._cluster_data = Some(inputs.clone());
-        }
-
         Ok(())
     }
 
     fn predict(&self, inputs: &Matrix<f64>) -> LearningResult<Vector<Option<usize>>> {
-        if self.predictive {
-            if let (&Some(ref cluster_data), &Some(ref clusters)) = (&self._cluster_data, &self.clusters) {
-                let mut classes = Vec::with_capacity(inputs.rows());
-
-                for input_point in inputs.row_iter() {
-                    let mut distances = Vec::with_capacity(cluster_data.rows());
-
-                    for cluster_point in cluster_data.row_iter() {
-                        let point_distance = utils::vec_bin_op(input_point.raw_slice(), cluster_point.raw_slice(), |x, y| x - y);
-                        distances.push(utils::dot(&point_distance, &point_distance).sqrt());
-                    }
-
-                    let (closest_idx, closest_dist) = utils::argmin(&distances);
-                    if closest_dist < self.eps {
-                        classes.push(clusters[closest_idx]);
-                    } else {
-                        classes.push(None);
-                    }
-                }
-
-                Ok(Vector::new(classes))
-            } else {
-                Err(Error::new_untrained())
-            }
-        } else {
-            Err(Error::new(ErrorKind::InvalidState, "Model must be set to predictive. Use `self.set_predictive(true)`."))
-        }
+        panic!("removed");
     }
 }
 
 impl DBSCAN {
     /// Create a new DBSCAN model with a given
     /// distance episilon and minimum points per cluster.
-    pub fn new(eps: f64, min_points: usize) -> DBSCAN {
+    pub fn new(inputs: &Matrix<f64>, eps: f64, min_points: usize) -> DBSCAN {
         assert!(eps > 0f64, "The model epsilon must be positive.");
 
-        DBSCAN {
+        let mut dbscan = DBSCAN {
             eps: eps,
             min_points: min_points,
-            clusters: None,
-            predictive: false,
-            _visited: Vec::new(),
-            _cluster_data: None,
-        }
+            clusters: vec![None; inputs.rows()],
+            _visited: vec![false; inputs.rows()],
+        };
+        dbscan.train(inputs).unwrap();
+        dbscan
     }
 
-    /// Set predictive to true if the model is to be used
-    /// to classify future points.
-    ///
-    /// If the model is set as predictive then the input data
-    /// will be cloned during training.
-    pub fn set_predictive(&mut self, predictive: bool) {
-        self.predictive = predictive;
-    }
-
-    /// Return an Option pointing to the model clusters.
-    pub fn clusters(&self) -> Option<&Vector<Option<usize>>> {
-        self.clusters.as_ref()
+    /// Clusters slice
+    pub fn clusters<'a>(&'a self) -> &'a [Option<usize>] {
+        &self.clusters
     }
 
     fn expand_cluster<'a>(&mut self, inputs: &Matrix<f64>, mut point_idx: usize, neighbours: &mut Vec<usize>, sub_neighbours: &mut Vec<usize>, cluster: usize, kdt: &KdTree<f64, usize, &'a [f64]>) {
         debug_assert!(point_idx < inputs.rows(), "Point index too large for inputs");
-        self.clusters.as_mut().map(|x| x.mut_data()[point_idx] = Some(cluster));
+        self.clusters[point_idx] = Some(cluster);
 
         while let Some(data_point_idx) = neighbours.pop() {
             debug_assert!(data_point_idx < inputs.rows(), "Data point index too large for inputs");
             debug_assert!(neighbours.iter().all(|x| *x < inputs.rows()), "Neighbour indices too large for inputs");
 
-            self.clusters.as_mut().map(|x| x.mut_data()[point_idx] = Some(cluster));
+            self.clusters[point_idx] = Some(cluster);
             let visited = self._visited[data_point_idx];
             if !visited {
                 self._visited[data_point_idx] = true;
@@ -218,18 +174,39 @@ impl DBSCAN {
         kdt
     }
 
-    fn init_params(&mut self, total_points: usize) {
-        unsafe {
-            self._visited.reserve(total_points);
-            self._visited.set_len(total_points);
-        }
-
-        for i in 0..total_points {
-            self._visited[i] = false;
-        }
-
-        self.clusters = Some(Vector::new(vec![None; total_points]));
+    /// Predict the clustering of new data given the data set the model was trained on.
+    pub fn predict(&self, cluster_data: &Matrix<f64>, new_data: &Matrix<f64>) -> LearningResult<Vec<ClusterPrediction>> {
+        let mut neighbours = Vec::with_capacity(cluster_data.rows());
+        let kdt = Self::kdtree(cluster_data);
+        Ok(new_data
+            .row_iter()
+            .map(|point| {
+                neighbours.clear();
+                self.region_query(point, cluster_data, &mut neighbours, &kdt);
+                let mut clusters = neighbours.iter().map(|idx| self.clusters[*idx]).unique().collect::<Vec<Option<usize>>>();
+                if neighbours.len() >= self.min_points - 1 {
+                    ClusterPrediction::Core(clusters)
+                } else if clusters.iter().any(|c| c.is_some()) {
+                    ClusterPrediction::Border(clusters)
+                } else {
+                    ClusterPrediction::Noise
+                }
+            })
+            .collect::<Vec<ClusterPrediction>>())
     }
+}
+
+/// Predicted cluster output
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClusterPrediction {
+    /// Point would be a core member of at least one cluster.
+    /// Multiple values indicates the new point would trigger a merging of clusters with each other
+    /// or with noise points.
+    Core(Vec<Option<usize>>),
+    /// Point would not be a core member but is within eps distance of at least one cluster.
+    Border(Vec<Option<usize>>),
+    /// Point is outside eps distance of all clusters.
+    Noise,
 }
 
 #[cfg(test)]
@@ -239,9 +216,8 @@ mod tests {
 
     #[test]
     fn test_region_query() {
-        let model = DBSCAN::new(1.0, 3);
-
         let inputs = Matrix::new(3, 2, vec![1.0, 1.0, 1.1, 1.9, 3.0, 3.0]);
+        let model = DBSCAN::new(&inputs, 1.0, 3);
         let kdt = DBSCAN::kdtree(&inputs);
 
         let m = matrix![1.0, 1.0];
@@ -254,9 +230,8 @@ mod tests {
 
     #[test]
     fn test_region_query_small_eps() {
-        let model = DBSCAN::new(0.01, 3);
-
         let inputs = Matrix::new(3, 2, vec![1.0, 1.0, 1.1, 1.9, 1.1, 1.1]);
+        let model = DBSCAN::new(&inputs, 0.01, 3);
         let kdt = DBSCAN::kdtree(&inputs);
 
         let m = matrix![1.0, 1.0];

@@ -109,6 +109,7 @@
 
 #[macro_use]
 extern crate rulinalg;
+extern crate itertools;
 extern crate kdtree;
 extern crate num as libnum;
 extern crate rand;
